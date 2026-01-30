@@ -1,5 +1,7 @@
 resource "aws_vpc" "this" {
   cidr_block = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
   tags = {
     Name        = "${var.project_name}-vpc"
@@ -23,6 +25,10 @@ resource "aws_subnet" "public" {
 
   tags = {
     Name = "${var.project_name}-public-subnet"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -52,6 +58,10 @@ resource "aws_subnet" "private" {
 
   tags = {
     Name = "${var.project_name}-private-subnet"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -86,7 +96,7 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "presentation" {
-  subnet_id      = aws_subnet.presentation.id
-  route_table_id = aws_route_table.presentation.id
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
 }
