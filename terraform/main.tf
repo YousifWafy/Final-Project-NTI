@@ -21,11 +21,11 @@ module "iam" {
 module "eks" {
   source = "./modules/eks"
 
-  cluster_name      = var.cluster_name
-  cluster_version   = var.cluster_version
+  cluster_name              = var.cluster_name
+  cluster_version           = var.cluster_version
   private_subnet_ids        = module.vpc.private_subnet_ids
-  cluster_role_arn  = module.iam.eks_cluster_role_arn
+  cluster_role_arn          = module.iam.eks_cluster_role_arn
   log_retention_in_days     = var.log_retention_in_days
   enabled_cluster_log_types = var.enabled_cluster_log_types
-  tags = var.tags
+  tags                      = var.tags
 }
