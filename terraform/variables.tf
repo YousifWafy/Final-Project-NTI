@@ -33,4 +33,16 @@ variable "private_subnet_cidr" {
   type        = string
 }
 
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
 
+variable "cluster_name" {
+  type = string
+}
+
+variable "attach_ssm" {
+  type    = bool
+  default = true
+}
