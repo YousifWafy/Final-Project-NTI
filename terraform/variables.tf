@@ -46,3 +46,18 @@ variable "attach_ssm" {
   type    = bool
   default = true
 }
+
+variable "enabled_cluster_log_types" {
+  type    = list(string)
+  default = ["api", "audit"]
+}
+
+variable "log_retention_in_days" {
+  type    = number
+  default = 7
+}
+
+variable "cluster_version" {
+  type = string
+}
+

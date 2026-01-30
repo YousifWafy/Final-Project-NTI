@@ -6,6 +6,7 @@ public_subnet_cidr  = "10.10.1.0/24"
 private_subnet_cidr = "10.10.11.0/24"
 availability_zone   = "ap-northeast-2a"
 cluster_name    = "prod-eks"
+cluster_version = "1.30"
 
 tags = {
   Project     = "nti-devops"

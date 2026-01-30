@@ -8,11 +8,6 @@ variable "cluster_version" {
   type        = string
 }
 
-variable "subnet_ids" {
-  description = "Subnets for EKS control plane"
-  type        = list(string)
-}
-
 variable "cluster_role_arn" {
   description = "IAM role ARN for EKS cluster"
   type        = string
