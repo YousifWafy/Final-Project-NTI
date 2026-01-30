@@ -9,3 +9,11 @@ module "vpc" {
   private_subnet_cidr = var.private_subnet_cidr
   availability_zone   = var.availability_zone
 }
+
+module "iam" {
+  source = "./modules/iam"
+
+  cluster_name = var.cluster_name
+  attach_ssm   = var.attach_ssm
+  tags         = var.tags
+}
