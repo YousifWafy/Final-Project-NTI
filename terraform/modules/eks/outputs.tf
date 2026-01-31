@@ -1,11 +1,24 @@
 output "cluster_name" {
-  value = aws_eks_cluster.this.name
+  description = "Name of the EKS cluster"
+  value       = aws_eks_cluster.this.name
 }
 
 output "cluster_endpoint" {
-  value = aws_eks_cluster.this.endpoint
+  description = "Endpoint for the EKS Kubernetes API server"
+  value       = aws_eks_cluster.this.endpoint
 }
 
-output "cluster_ca" {
-  value = aws_eks_cluster.this.certificate_authority[0].data
+output "cluster_certificate_authority_data" {
+  description = "Base64 encoded certificate data required to communicate with the EKS cluster"
+  value       = aws_eks_cluster.this.certificate_authority[0].data
+}
+
+output "cluster_security_group_id" {
+  description = "Security group ID automatically created by EKS for the control plane"
+  value       = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+}
+
+output "oidc_issuer_url" {
+  description = "OIDC issuer URL used for IAM Roles for Service Accounts (IRSA)"
+  value       = aws_eks_cluster.this.identity[0].oidc[0].issuer
 }
