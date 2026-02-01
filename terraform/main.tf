@@ -30,9 +30,9 @@ module "eks" {
   endpoint_public_access  = var.endpoint_public_access
   endpoint_private_access = var.endpoint_private_access
 
-  node_desired   = var.node_desired
-  node_min       = var.node_min
-  node_max       = var.node_max
+  node_desired = var.node_desired
+  node_min     = var.node_min
+  node_max     = var.node_max
 
   instance_types = var.instance_types
   capacity_type  = var.capacity_type
@@ -46,7 +46,7 @@ module "iam_irsa" {
   source = "./modules/iam-irsa"
 
   oidc_issuer_url = module.eks.oidc_issuer_url
-  cluster_name     = var.cluster_name
+  cluster_name    = var.cluster_name
   irsa_roles = {
     ebs_csi = {
       namespace            = "kube-system"
@@ -66,5 +66,5 @@ resource "aws_eks_addon" "ebs_csi" {
   service_account_role_arn = module.iam_irsa.irsa_role_arns["ebs_csi"]
 
   resolve_conflicts_on_update = "OVERWRITE"
-  tags                       = var.tags
+  tags                        = var.tags
 }
