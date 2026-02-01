@@ -13,3 +13,8 @@ tags = {
   Environment = "prod"
 }
 
+node_desired   = 2
+node_min       = 2
+node_max       = 4
+instance_types = ["t3.large"]
+capacity_type  = "ON_DEMAND"

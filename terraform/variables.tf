@@ -42,6 +42,16 @@ variable "cluster_name" {
   type = string
 }
 
+variable "endpoint_public_access" {
+  type    = bool
+  default = true
+}
+
+variable "endpoint_private_access" {
+  type    = bool
+  default = false
+}
+
 variable "attach_ssm" {
   type    = bool
   default = true
@@ -61,3 +71,27 @@ variable "cluster_version" {
   type = string
 }
 
+variable "node_desired" {
+  type    = number
+  default = 2
+}
+
+variable "node_min" {
+  type    = number
+  default = 1
+}
+
+variable "node_max" {
+  type    = number
+  default = 3
+}
+
+variable "instance_types" {
+  type    = list(string)
+  default = ["t3.medium"]
+}
+
+variable "capacity_type" {
+  type    = string
+  default = "ON_DEMAND"
+}
