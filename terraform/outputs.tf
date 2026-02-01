@@ -28,9 +28,9 @@ output "oidc_issuer_url" {
 }
 
 output "oidc_provider_arn" {
-  value = module.irsa.oidc_provider_arn
+  value = module.iam_irsa.oidc_provider_arn
 }
 
 output "irsa_role_arns" {
-  value = module.irsa.irsa_role_arns
+  value = module.iam_irsa.irsa_role_arns
 }
