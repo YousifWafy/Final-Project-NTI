@@ -70,9 +70,10 @@ module "cognito" {
 module "api_gw" {
   source = "./modules/api-gw"
 
-  name              = var.api_gw_name
+  name               = var.api_gw_name
   private_subnet_ids = module.vpc.private_subnet_ids
   nlb_listener_arn   = var.nlb_listener_arn
+  vpc_id             = module.vpc.vpc_id
 
   cognito_issuer_url = module.cognito.issuer_url
   cognito_audience   = module.cognito.app_client_id

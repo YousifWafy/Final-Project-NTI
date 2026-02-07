@@ -4,10 +4,24 @@ resource "aws_apigatewayv2_api" "this" {
   tags          = var.tags
 }
 
+resource "aws_security_group" "vpc_link" {
+  name        = "${var.name}-vpclink-sg"
+  description = "Security group for API Gateway VPC Link"
+  vpc_id      = var.vpc_id
+  tags        = var.tags
+}
+
+resource "aws_vpc_security_group_egress_rule" "all" {
+  security_group_id = aws_security_group.vpc_link.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
 resource "aws_apigatewayv2_vpc_link" "this" {
-  name       = "${var.name}-vpc-link"
-  subnet_ids = var.private_subnet_ids
-  tags       = var.tags
+  name               = "${var.name}-vpc-link"
+  subnet_ids         = var.private_subnet_ids
+  security_group_ids = [aws_security_group.vpc_link.id]
+  tags               = var.tags
 }
 
 resource "aws_apigatewayv2_integration" "nlb" {
