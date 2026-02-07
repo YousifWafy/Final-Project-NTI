@@ -95,3 +95,8 @@ variable "capacity_type" {
   type    = string
   default = "ON_DEMAND"
 }
+
+variable "cognito_name" {
+  description = "Name prefix for Cognito resources (user pool and app client)"
+  type        = string
+}

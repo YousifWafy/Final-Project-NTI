@@ -34,3 +34,15 @@ output "oidc_provider_arn" {
 output "irsa_role_arns" {
   value = module.iam_irsa.irsa_role_arns
 }
+
+output "cognito_user_pool_id" {
+  value = module.cognito.user_pool_id
+}
+
+output "cognito_app_client_id" {
+  value = module.cognito.app_client_id
+}
+
+output "cognito_issuer_url" {
+  value = module.cognito.issuer_url
+}

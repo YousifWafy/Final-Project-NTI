@@ -59,3 +59,10 @@ module "iam_irsa" {
 
   tags = var.tags
 }
+
+module "cognito" {
+  source = "./modules/cognito"
+
+  name = var.cognito_name
+  tags = var.tags
+}
