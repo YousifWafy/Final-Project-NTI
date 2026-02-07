@@ -46,3 +46,7 @@ output "cognito_app_client_id" {
 output "cognito_issuer_url" {
   value = module.cognito.issuer_url
 }
+
+output "api_gateway_endpoint" {
+  value = module.api_gw.api_endpoint
+}

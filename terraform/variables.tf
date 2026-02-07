@@ -100,3 +100,13 @@ variable "cognito_name" {
   description = "Name prefix for Cognito resources (user pool and app client)"
   type        = string
 }
+
+variable "api_gw_name" {
+  type        = string
+  description = "Name prefix for API Gateway"
+}
+
+variable "nlb_listener_arn" {
+  type        = string
+  description = "NLB Listener ARN (from ingress-nginx NLB listener 80)"
+}

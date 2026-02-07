@@ -66,3 +66,16 @@ module "cognito" {
   name = var.cognito_name
   tags = var.tags
 }
+
+module "api_gw" {
+  source = "./modules/api-gw"
+
+  name              = var.api_gw_name
+  private_subnet_ids = module.vpc.private_subnet_ids
+  nlb_listener_arn   = var.nlb_listener_arn
+
+  cognito_issuer_url = module.cognito.issuer_url
+  cognito_audience   = module.cognito.app_client_id
+
+  tags = var.tags
+}

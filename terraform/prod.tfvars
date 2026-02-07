@@ -20,3 +20,6 @@ instance_types = ["t3.large"]
 capacity_type  = "ON_DEMAND"
 
 cognito_name = "nti-prod"
+
+api_gw_name = "nti-prod-api"
+nlb_listener_arn = ""
