@@ -72,9 +72,8 @@ module "api_gw" {
 
   name               = var.api_gw_name
   private_subnet_ids = module.vpc.private_subnet_ids
-  nlb_listener_arn   = module.nlb.listener_arn
+  nlb_listener_arn   = var.enable_nlb ? module.nlb[0].listener_arn : null
   vpc_id             = module.vpc.vpc_id
-
   cognito_issuer_url = module.cognito.issuer_url
   cognito_audience   = module.cognito.app_client_id
 
@@ -82,7 +81,7 @@ module "api_gw" {
 }
 
 module "nlb" {
-  count = var.enable_nlb ? 1 : 0
+  count      = var.enable_nlb ? 1 : 0
   source     = "./modules/nlb"
   name       = "nonprod-nlb"
   vpc_id     = module.vpc.vpc_id
@@ -99,7 +98,7 @@ module "nlb" {
 }
 
 module "aws_lbc" {
-  count = var.enable_aws_lbc ? 1 : 0
+  count  = var.enable_aws_lbc ? 1 : 0
   source = "./modules/aws_lbc"
 
   cluster_name      = module.eks.cluster_name

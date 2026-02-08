@@ -55,19 +55,24 @@ resource "helm_release" "aws_lbc" {
   wait    = true
 
   values = [
-    yamlencode({
-      clusterName = var.cluster_name
-      region      = var.region
+  yamlencode({
+    clusterName = var.cluster_name
+    region      = var.region
+    vpcId       = data.aws_eks_cluster.this.vpc_config[0].vpc_id
 
-      serviceAccount = {
-        create = true
-        name   = local.sa_name
-        annotations = {
-          "eks.amazonaws.com/role-arn" = aws_iam_role.this.arn
-        }
+    serviceAccount = {
+      create = true
+      name   = local.sa_name
+      annotations = {
+        "eks.amazonaws.com/role-arn" = aws_iam_role.this.arn
       }
-    })
-  ]
+    }
+
+    extraArgs = {
+      "aws-vpc-id" = data.aws_eks_cluster.this.vpc_config[0].vpc_id
+    }
+  })
+]
 
   depends_on = [aws_iam_role_policy_attachment.attach]
 }

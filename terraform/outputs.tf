@@ -52,13 +52,13 @@ output "api_gateway_endpoint" {
 }
 
 output "nlb_dns_name" {
-  value = module.nlb.nlb_dns_name
+  value = var.enable_nlb ? module.nlb[0].nlb_dns_name : null
 }
 
 output "nlb_listener_arn" {
-  value = module.nlb.listener_arn
+  value = var.enable_nlb ? module.nlb[0].listener_arn : null
 }
 
 output "nlb_target_group_arn" {
-  value = module.nlb.target_group_arn
+  value = var.enable_nlb ? module.nlb[0].target_group_arn : null
 }
