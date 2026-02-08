@@ -110,3 +110,13 @@ variable "nlb_listener_arn" {
   type        = string
   description = "NLB Listener ARN (from ingress-nginx NLB listener 80)"
 }
+
+variable "enable_nlb" {
+  type    = bool
+  default = false
+}
+
+variable "enable_aws_lbc" {
+  type    = bool
+  default = false
+}

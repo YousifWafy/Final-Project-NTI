@@ -12,3 +12,8 @@ output "irsa_role_names" {
   description = "Map of IRSA role names keyed by role name in irsa_roles"
   value       = { for k, r in aws_iam_role.this : k => r.name }
 }
+
+output "oidc_issuer_url" {
+  description = "OIDC issuer URL for the EKS cluster"
+  value       = aws_iam_openid_connect_provider.this.url
+}

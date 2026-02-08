@@ -72,11 +72,43 @@ module "api_gw" {
 
   name               = var.api_gw_name
   private_subnet_ids = module.vpc.private_subnet_ids
-  nlb_listener_arn   = var.nlb_listener_arn
+  nlb_listener_arn   = module.nlb.listener_arn
   vpc_id             = module.vpc.vpc_id
 
   cognito_issuer_url = module.cognito.issuer_url
   cognito_audience   = module.cognito.app_client_id
 
   tags = var.tags
+}
+
+module "nlb" {
+  count = var.enable_nlb ? 1 : 0
+  source     = "./modules/nlb"
+  name       = "nonprod-nlb"
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.public_subnet_ids
+  internal   = false
+
+  listener_port = 80
+  target_port   = 80
+
+  tags = {
+    Environment = "nonprod"
+    Project     = "nti-devops"
+  }
+}
+
+module "aws_lbc" {
+  count = var.enable_aws_lbc ? 1 : 0
+  source = "./modules/aws_lbc"
+
+  cluster_name      = module.eks.cluster_name
+  region            = var.region
+  oidc_provider_arn = module.iam_irsa.oidc_provider_arn
+  oidc_issuer_url   = module.iam_irsa.oidc_issuer_url
+
+  tags = {
+    Environment = "nonprod"
+    Project     = "nti-devops"
+  }
 }

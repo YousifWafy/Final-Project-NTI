@@ -50,3 +50,15 @@ output "cognito_issuer_url" {
 output "api_gateway_endpoint" {
   value = module.api_gw.api_endpoint
 }
+
+output "nlb_dns_name" {
+  value = module.nlb.nlb_dns_name
+}
+
+output "nlb_listener_arn" {
+  value = module.nlb.listener_arn
+}
+
+output "nlb_target_group_arn" {
+  value = module.nlb.target_group_arn
+}

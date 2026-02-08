@@ -1,0 +1,11 @@
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: my-app-tgb
+  namespace: default
+spec:
+  serviceRef:
+    name: my-app
+    port: 80
+  targetGroupARN: "PUT_TG_ARN_HERE"
+  targetType: ip
