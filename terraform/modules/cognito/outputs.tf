@@ -11,7 +11,3 @@ output "app_client_id" {
 output "issuer_url" {
   value = "https://cognito-idp.${data.aws_region.current.region}.amazonaws.com/${aws_cognito_user_pool.this.id}"
 }
-
-# cognito_app_client_id = "738jn3bkk9ucqbmvv7s2tc5el6"
-# cognito_issuer_url = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_lo3mB3ICJ"
-# cognito_user_pool_id = "ap-northeast-2_lo3mB3ICJ"
