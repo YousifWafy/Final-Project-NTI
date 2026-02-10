@@ -21,8 +21,8 @@ capacity_type  = "ON_DEMAND"
 
 cognito_name = "nti-nonprod"
 
-api_gw_name      = "nti-nonprod-api"
-nlb_listener_arn = "arn:aws:elasticloadbalancing:ap-northeast-2:804139726674:listener/net/a5db714e03e7742dc83c4c1e5e2f5eda/dc98684dfbee2ef3/3f20f41251df8d8c"
+api_gw_name = "nti-nonprod-api"
 
-enable_nlb     = false
-enable_aws_lbc = false
+nlb_listener_arn = ""
+enable_nlb       = false
+enable_aws_lbc   = false

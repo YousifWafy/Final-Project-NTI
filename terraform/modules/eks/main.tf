@@ -16,8 +16,8 @@ resource "aws_eks_cluster" "this" {
   }
 
   enabled_cluster_log_types = var.enabled_cluster_log_types
-  depends_on = [aws_cloudwatch_log_group.this]
-  tags       = var.tags
+  depends_on                = [aws_cloudwatch_log_group.this]
+  tags                      = var.tags
 }
 
 resource "aws_eks_node_group" "this" {
@@ -39,8 +39,8 @@ resource "aws_eks_node_group" "this" {
 }
 
 resource "aws_eks_addon" "vpc_cni" {
-  cluster_name  = aws_eks_cluster.this.name
-  addon_name    = "vpc-cni"
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "vpc-cni"
 
   depends_on = [aws_eks_node_group.this]
 }
@@ -65,6 +65,6 @@ resource "aws_eks_addon" "ebs_csi" {
   service_account_role_arn = var.ebs_csi_service_account_role_arn
 
   resolve_conflicts_on_update = "OVERWRITE"
-  depends_on = [aws_eks_node_group.this]
-  tags                       = var.tags
+  depends_on                  = [aws_eks_node_group.this]
+  tags                        = var.tags
 }

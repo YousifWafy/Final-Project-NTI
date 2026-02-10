@@ -1,6 +1,6 @@
 locals {
-  namespace       = "kube-system"
-  sa_name         = "aws-load-balancer-controller"
+  namespace        = "kube-system"
+  sa_name          = "aws-load-balancer-controller"
   oidc_issuer_host = replace(var.oidc_issuer_url, "https://", "")
 }
 
@@ -51,28 +51,28 @@ resource "helm_release" "aws_lbc" {
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
   version    = "1.7.2"
-  timeout = 900
-  wait    = true
+  timeout    = 900
+  wait       = true
 
   values = [
-  yamlencode({
-    clusterName = var.cluster_name
-    region      = var.region
-    vpcId       = data.aws_eks_cluster.this.vpc_config[0].vpc_id
+    yamlencode({
+      clusterName = var.cluster_name
+      region      = var.region
+      vpcId       = data.aws_eks_cluster.this.vpc_config[0].vpc_id
 
-    serviceAccount = {
-      create = true
-      name   = local.sa_name
-      annotations = {
-        "eks.amazonaws.com/role-arn" = aws_iam_role.this.arn
+      serviceAccount = {
+        create = true
+        name   = local.sa_name
+        annotations = {
+          "eks.amazonaws.com/role-arn" = aws_iam_role.this.arn
+        }
       }
-    }
 
-    extraArgs = {
-      "aws-vpc-id" = data.aws_eks_cluster.this.vpc_config[0].vpc_id
-    }
-  })
-]
+      extraArgs = {
+        "aws-vpc-id" = data.aws_eks_cluster.this.vpc_config[0].vpc_id
+      }
+    })
+  ]
 
   depends_on = [aws_iam_role_policy_attachment.attach]
 }

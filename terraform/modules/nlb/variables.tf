@@ -7,7 +7,7 @@ variable "vpc_id" {
 }
 
 variable "subnet_ids" {
-  type = list(string)
+  type        = list(string)
   description = "Subnets where the NLB will live (usually public subnets for internet-facing)"
 }
 
