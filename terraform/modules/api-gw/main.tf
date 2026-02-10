@@ -5,12 +5,12 @@ locals {
 resource "aws_apigatewayv2_integration" "nlb" {
   count = local.enable_nlb_integration ? 1 : 0
 
-  api_id                = aws_apigatewayv2_api.this.id
-  integration_type      = "HTTP_PROXY"
-  connection_type       = "VPC_LINK"
-  connection_id         = aws_apigatewayv2_vpc_link.this.id
-  integration_method    = "ANY"
-  integration_uri       = var.nlb_listener_arn
+  api_id                 = aws_apigatewayv2_api.this.id
+  integration_type       = "HTTP_PROXY"
+  connection_type        = "VPC_LINK"
+  connection_id          = aws_apigatewayv2_vpc_link.this.id
+  integration_method     = "ANY"
+  integration_uri        = var.nlb_listener_arn
   payload_format_version = "1.0"
 }
 
