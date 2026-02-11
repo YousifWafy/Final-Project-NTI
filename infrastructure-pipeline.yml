@@ -3,7 +3,7 @@ trigger: none
 pr: none
 
 pool:
-  name: queue-yousif
+  name: Yousif-Agent_Pool
 
 parameters:
   - name: env
@@ -94,102 +94,92 @@ stages:
             -backend-config="region=$(AWS_REGION)" \
             -backend-config="encrypt=true"
 
+          mkdir -p "$(Build.ArtifactStagingDirectory)/tfplan"
+
           echo "==> terraform plan"
-          terraform plan -var-file="$(TF_VAR_FILE)" -out=tfplan
+          terraform plan -var-file="$(TF_VAR_FILE)" -out="$(Build.ArtifactStagingDirectory)/tfplan/tfplan"
 
           echo "==> save readable plan"
-          terraform show -no-color tfplan > tfplan.txt
+          terraform show -no-color "$(Build.ArtifactStagingDirectory)/tfplan/tfplan" > "$(Build.ArtifactStagingDirectory)/tfplan/tfplan.txt"
 
-    - publish: $(TF_DIR)/tfplan
+    - publish: $(Build.ArtifactStagingDirectory)/tfplan
       displayName: 'Publish tfplan artifact'
       artifact: tfplan
-
-    - publish: $(TF_DIR)/tfplan.txt
-      displayName: 'Publish tfplan.txt artifact'
-      artifact: tfplan_txt
 
 - stage: Apply
   displayName: 'Terraform Apply'
   dependsOn: Plan
   condition: and(succeeded(), eq('${{ parameters.action }}', 'apply'))
   jobs:
-  - deployment: Apply
+  - job: Apply
     displayName: Apply Infra
-    environment: '${{ parameters.env }}'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: self
+    steps:
+    - checkout: self
 
-          - download: current
-            artifact: tfplan
+    - download: current
+      artifact: tfplan
 
-          - task: TerraformInstaller@1
-            displayName: Install Terraform
-            inputs:
-              terraformVersion: latest
+    - task: TerraformInstaller@1
+      displayName: Install Terraform
+      inputs:
+        terraformVersion: latest
 
-          - task: AWSShellScript@1
-            displayName: Terraform init + apply (from plan)
-            inputs:
-              awsCredentials: $(AWS_SERVICE_CONNECTION)
-              regionName: $(AWS_REGION)
-              scriptType: inline
-              inlineScript: |
-                set -euo pipefail
-                cd "$(TF_DIR)"
+    - task: AWSShellScript@1
+      displayName: Terraform init + apply (from plan)
+      inputs:
+        awsCredentials: $(AWS_SERVICE_CONNECTION)
+        regionName: $(AWS_REGION)
+        scriptType: inline
+        inlineScript: |
+          set -euo pipefail
+          cd "$(TF_DIR)"
 
-                terraform init -reconfigure \
-                  -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
-                  -backend-config="key=$(TF_BACKEND_KEY)" \
-                  -backend-config="region=$(AWS_REGION)" \
-                  -backend-config="encrypt=true"
+          terraform init -reconfigure \
+            -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
+            -backend-config="key=$(TF_BACKEND_KEY)" \
+            -backend-config="region=$(AWS_REGION)" \
+            -backend-config="encrypt=true"
 
-                echo "==> terraform apply using plan artifact"
-                terraform apply -auto-approve "$(Pipeline.Workspace)/tfplan/tfplan"
+          echo "==> terraform apply using plan artifact"
+          terraform apply -auto-approve "$(Pipeline.Workspace)/tfplan/tfplan"
 
-                echo "==> export outputs"
-                terraform output -json > outputs.json
+          echo "==> export outputs"
+          terraform output -json > outputs.json
 
-          - publish: $(TF_DIR)/outputs.json
-            displayName: 'Publish outputs.json'
-            artifact: tf_outputs
+    - publish: $(TF_DIR)/outputs.json
+      displayName: 'Publish outputs.json'
+      artifact: tf_outputs
 
 - stage: Destroy
   displayName: 'Terraform Destroy'
   dependsOn: Validate
   condition: and(succeeded(), eq('${{ parameters.action }}', 'destroy'))
   jobs:
-  - deployment: Destroy
+  - job: Destroy
     displayName: Destroy Infra
-    environment: '${{ parameters.env }}'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: self
+    steps:
+    - checkout: self
 
-          - task: TerraformInstaller@1
-            displayName: Install Terraform
-            inputs:
-              terraformVersion: latest
+    - task: TerraformInstaller@1
+      displayName: Install Terraform
+      inputs:
+        terraformVersion: latest
 
-          - task: AWSShellScript@1
-            displayName: Terraform init + destroy
-            inputs:
-              awsCredentials: $(AWS_SERVICE_CONNECTION)
-              regionName: $(AWS_REGION)
-              scriptType: inline
-              inlineScript: |
-                set -euo pipefail
-                cd "$(TF_DIR)"
+    - task: AWSShellScript@1
+      displayName: Terraform init + destroy
+      inputs:
+        awsCredentials: $(AWS_SERVICE_CONNECTION)
+        regionName: $(AWS_REGION)
+        scriptType: inline
+        inlineScript: |
+          set -euo pipefail
+          cd "$(TF_DIR)"
 
-                terraform init -reconfigure \
-                  -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
-                  -backend-config="key=$(TF_BACKEND_KEY)" \
-                  -backend-config="region=$(AWS_REGION)" \
-                  -backend-config="encrypt=true"
+          terraform init -reconfigure \
+            -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
+            -backend-config="key=$(TF_BACKEND_KEY)" \
+            -backend-config="region=$(AWS_REGION)" \
+            -backend-config="encrypt=true"
 
-                echo "==> terraform destroy"
-                terraform destroy -auto-approve -var-file="$(TF_VAR_FILE)"
+          echo "==> terraform destroy"
+          terraform destroy -auto-approve -var-file="$(TF_VAR_FILE)"
