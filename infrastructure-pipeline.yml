@@ -21,6 +21,7 @@ parameters:
 variables:
   TF_DIR: 'terraform'
   TF_VAR_FILE: '${{ parameters.env }}.tfvars'
+
   AWS_SERVICE_CONNECTION: 'yousif-aws-v2'
   AWS_REGION: 'ap-northeast-2'
   TF_IN_AUTOMATION: 'true'
@@ -51,6 +52,14 @@ stages:
           set -euo pipefail
           cd "$(TF_DIR)"
 
+          echo "==> enable terraform plugin cache if present"
+          if [ -f "$HOME/.terraformrc" ]; then
+            export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+            echo "TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
+          else
+            echo "##[warning]~/.terraformrc not found. Providers may download from internet."
+          fi
+
           echo "==> terraform fmt -check"
           terraform fmt -check -recursive
 
@@ -67,7 +76,7 @@ stages:
 - stage: Plan
   displayName: 'Terraform Plan'
   dependsOn: Validate
-  condition: succeeded()
+  condition: and(succeeded(), ne('${{ parameters.action }}', 'destroy'))
   jobs:
   - job: Plan
     steps:
@@ -87,6 +96,14 @@ stages:
         inlineScript: |
           set -euo pipefail
           cd "$(TF_DIR)"
+
+          echo "==> enable terraform plugin cache if present"
+          if [ -f "$HOME/.terraformrc" ]; then
+            export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+            echo "TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
+          else
+            echo "##[warning]~/.terraformrc not found. Providers may download from internet."
+          fi
 
           terraform init -reconfigure \
             -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
@@ -125,7 +142,7 @@ stages:
         terraformVersion: latest
 
     - task: AWSShellScript@1
-      displayName: Terraform init + apply (from plan)
+      displayName: Terraform init + (auto-import if needed) + apply (from plan)
       inputs:
         awsCredentials: $(AWS_SERVICE_CONNECTION)
         regionName: $(AWS_REGION)
@@ -134,11 +151,48 @@ stages:
           set -euo pipefail
           cd "$(TF_DIR)"
 
+          echo "==> enable terraform plugin cache if present"
+          if [ -f "$HOME/.terraformrc" ]; then
+            export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+            echo "TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
+          else
+            echo "##[warning]~/.terraformrc not found. Providers may download from internet."
+          fi
+
           terraform init -reconfigure \
             -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
             -backend-config="key=$(TF_BACKEND_KEY)" \
             -backend-config="region=$(AWS_REGION)" \
             -backend-config="encrypt=true"
+
+          echo "==> precheck: auto-import IAM roles if they already exist (avoid EntityAlreadyExists)"
+          ENV_NAME='${{ parameters.env }}'
+          CLUSTER_ROLE_NAME="${ENV_NAME}-eks-cluster-role"
+          NODE_ROLE_NAME="${ENV_NAME}-eks-node-role"
+
+          # helper: import if exists in AWS but not in TF state
+          import_role_if_needed () {
+            local tf_addr="$1"
+            local role_name="$2"
+
+            if terraform state show "$tf_addr" >/dev/null 2>&1; then
+              echo "TF state already has: $tf_addr"
+              return 0
+            fi
+
+            if aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+              echo "Role exists in AWS but not in state => importing: $role_name into $tf_addr"
+              terraform import -var-file="$(TF_VAR_FILE)" "$tf_addr" "$role_name" || {
+                echo "##[error]Import failed for $role_name ($tf_addr)"
+                exit 1
+              }
+            else
+              echo "Role not found in AWS (OK to create): $role_name"
+            fi
+          }
+
+          import_role_if_needed "module.iam.aws_iam_role.eks_cluster_role" "$CLUSTER_ROLE_NAME"
+          import_role_if_needed "module.iam.aws_iam_role.eks_node_role" "$NODE_ROLE_NAME"
 
           echo "==> terraform apply using plan artifact"
           terraform apply -auto-approve "$(Pipeline.Workspace)/tfplan/tfplan"
@@ -174,6 +228,14 @@ stages:
         inlineScript: |
           set -euo pipefail
           cd "$(TF_DIR)"
+
+          echo "==> enable terraform plugin cache if present"
+          if [ -f "$HOME/.terraformrc" ]; then
+            export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+            echo "TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
+          else
+            echo "##[warning]~/.terraformrc not found. Providers may download from internet."
+          fi
 
           terraform init -reconfigure \
             -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
