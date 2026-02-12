@@ -21,25 +21,40 @@ variables:
   AWS_SERVICE_CONNECTION: 'yousif-aws-v2'
   AWS_REGION: 'ap-northeast-2'
 
+  # IMPORTANT: use the same backend as infra pipeline
+  TF_BACKEND_BUCKET: 'yousif-project-bucket'
+  TF_BACKEND_KEY: '${{ parameters.env }}/terraform.tfstate'
+
 pool:
   name: Yousif-Agent_Pool
 
 jobs:
 - job: Platform
-  displayName: 'Platform Addons (Nginx, OAuth2-Proxy, Vault, ArgoCD, Sonar)'
-  timeoutInMinutes: 180
+  displayName: 'Platform Addons (Nginx, OAuth2-Proxy, Vault, ArgoCD, SonarQube)'
+  timeoutInMinutes: 200
+
   steps:
   - checkout: self
     fetchDepth: 1
 
-  # 0) Terraform preflight (init only - outputs reading)
+  # -----------------------------
+  # 0) Tools
+  # -----------------------------
   - task: TerraformInstaller@1
     displayName: Install Terraform
     inputs:
       terraformVersion: latest
 
+  - task: HelmInstaller@1
+    displayName: Install Helm
+    inputs:
+      helmVersionToInstall: 'latest'
+
+  # -----------------------------
+  # 1) Terraform init (NO PROMPTS) + plugin cache
+  # -----------------------------
   - task: AWSShellScript@1
-    displayName: Terraform init (prefer plugin cache, lockfile readonly)
+    displayName: Terraform init (S3 backend + cache)
     inputs:
       awsCredentials: $(AWS_SERVICE_CONNECTION)
       regionName: $(AWS_REGION)
@@ -51,6 +66,7 @@ jobs:
         echo "Terraform version:"
         terraform -version
 
+        # Use plugin cache if exists on self-hosted agent
         if [ -f "$HOME/.terraformrc" ]; then
           export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
           echo "Using TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
@@ -62,9 +78,18 @@ jobs:
         mkdir -p "$TF_PLUGIN_CACHE_DIR" || true
         echo "TF_PLUGIN_CACHE_DIR=$TF_PLUGIN_CACHE_DIR"
 
-        terraform init -reconfigure -lockfile=readonly
+        echo "==> terraform init (backend-config) bucket=$(TF_BACKEND_BUCKET) key=$(TF_BACKEND_KEY)"
+        terraform init -reconfigure -lockfile=readonly \
+          -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
+          -backend-config="key=$(TF_BACKEND_KEY)" \
+          -backend-config="region=$(AWS_REGION)" \
+          -backend-config="encrypt=true"
 
-  # 1) Configure kubeconfig
+        terraform output || true
+
+  # -----------------------------
+  # 2) kubeconfig from TF output
+  # -----------------------------
   - task: AWSShellScript@1
     displayName: Configure kubeconfig
     inputs:
@@ -85,6 +110,7 @@ jobs:
         echo "Updating kubeconfig for: $CLUSTER_NAME"
         aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$(AWS_REGION)"
 
+        # Patch kubeconfig to use absolute aws path (macOS sed differs)
         AWS_BIN="$(command -v aws || true)"
         if [ -n "$AWS_BIN" ]; then
           if sed --version >/dev/null 2>&1; then
@@ -94,19 +120,13 @@ jobs:
           fi
         fi
 
-        kubectl get nodes
-
-  # 2) Helm (needed for deploy/destroy)
-  - task: HelmInstaller@1
-    displayName: Install Helm
-    inputs:
-      helmVersionToInstall: 'latest'
+        echo "Cluster access check:"
+        kubectl get nodes --request-timeout=30s
 
   # -----------------------------
-  # DEPLOY
+  # DEPLOY MODE
   # -----------------------------
 
-  # 3) Nginx Ingress
   - task: AWSShellScript@1
     displayName: Deploy Nginx Ingress (NLB)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -117,21 +137,26 @@ jobs:
       inlineScript: |
         set -euo pipefail
 
-        echo "Installing ingress-nginx..."
-        helm upgrade --install ingress-nginx ingress-nginx \
-          --repo https://kubernetes.github.io/ingress-nginx \
-          --namespace ingress-nginx --create-namespace \
-          --version 4.11.3 \
-          --set controller.service.type=LoadBalancer \
-          --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="nlb" \
-          --set controller.admissionWebhooks.enabled=false \
-          --wait --timeout 20m --debug
+        echo "Installing ingress-nginx (retry up to 3)..."
+        for n in 1 2 3; do
+          if helm upgrade --install ingress-nginx ingress-nginx \
+            --repo https://kubernetes.github.io/ingress-nginx \
+            --namespace ingress-nginx --create-namespace \
+            --version 4.11.3 \
+            --set controller.service.type=LoadBalancer \
+            --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="nlb" \
+            --set controller.admissionWebhooks.enabled=false \
+            --wait --timeout 25m --atomic --debug; then
+            break
+          fi
+          echo "Attempt $n failed. Sleeping 15s then retry..."
+          sleep 15
+        done
 
-        kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide
+        kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide --request-timeout=30s
 
-  # 4) Export TF outputs + get Cognito secret from AWS (instead of TF output)
   - task: AWSShellScript@1
-    displayName: Export Terraform outputs + fetch Cognito client secret
+    displayName: Update Terraform with NLB DNS + Listener ARN (optional)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
     inputs:
       awsCredentials: $(AWS_SERVICE_CONNECTION)
@@ -141,31 +166,71 @@ jobs:
         set -euo pipefail
         cd "$(TF_DIR)"
 
-        # NOTE: These match your real outputs
+        echo "Waiting for NLB hostname..."
+        NLB_DNS=""
+        for i in {1..36}; do
+          NLB_DNS="$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' --request-timeout=30s 2>/dev/null || true)"
+          if [ -n "$NLB_DNS" ]; then break; fi
+          sleep 10
+        done
+
+        if [ -z "$NLB_DNS" ]; then
+          echo "##[warning]NLB DNS not ready. Skipping terraform apply for NLB vars."
+          exit 0
+        fi
+
+        echo "NLB DNS: $NLB_DNS"
+        NLB_NAME="$(echo "$NLB_DNS" | cut -d'-' -f1)"
+
+        LB_ARN="$(aws elbv2 describe-load-balancers --names "$NLB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text)"
+        LISTENER_ARN="$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[0].ListenerArn' --output text)"
+
+        echo "LISTENER_ARN: $LISTENER_ARN"
+
+        if [ -f "$HOME/.terraformrc" ]; then
+          export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+        fi
+
+        terraform apply -auto-approve \
+          -var-file="$(TF_VAR_FILE)" \
+          -var="nlb_dns_name=http://$NLB_DNS" \
+          -var="nlb_listener_arn=$LISTENER_ARN"
+
+  - task: AWSShellScript@1
+    displayName: Export Cognito + APIGW outputs (and fetch Cognito secret)
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+        cd "$(TF_DIR)"
+
+        # MATCH YOUR REAL OUTPUT NAMES
         COGNITO_CLIENT_ID="$(terraform output -raw cognito_app_client_id 2>/dev/null || true)"
-        COGNITO_USER_POOL_ID="$(terraform output -raw cognito_user_pool_id 2>/dev/null || true)"
         COGNITO_ISSUER_URL="$(terraform output -raw cognito_issuer_url 2>/dev/null || true)"
         APIGW_URL="$(terraform output -raw api_gateway_endpoint 2>/dev/null || true)"
+        USER_POOL_ID="$(terraform output -raw cognito_user_pool_id 2>/dev/null || true)"
 
-        if [ -z "$COGNITO_CLIENT_ID" ] || [ -z "$COGNITO_USER_POOL_ID" ] || [ -z "$COGNITO_ISSUER_URL" ] || [ -z "$APIGW_URL" ]; then
-          echo "##[error]Missing required terraform outputs. Current outputs:"
+        if [ -z "$COGNITO_CLIENT_ID" ] || [ -z "$COGNITO_ISSUER_URL" ] || [ -z "$APIGW_URL" ] || [ -z "$USER_POOL_ID" ]; then
+          echo "##[error]Missing required terraform outputs. Found:"
           terraform output || true
           exit 1
         fi
 
-        echo "Fetching Cognito app client secret from AWS..."
+        # Fetch the client secret from AWS (requires the app client to have GenerateSecret enabled)
         COGNITO_CLIENT_SECRET="$(aws cognito-idp describe-user-pool-client \
-          --user-pool-id "$COGNITO_USER_POOL_ID" \
+          --user-pool-id "$USER_POOL_ID" \
           --client-id "$COGNITO_CLIENT_ID" \
-          --query 'UserPoolClient.ClientSecret' \
-          --output text 2>/dev/null || true)"
+          --query 'UserPoolClient.ClientSecret' --output text 2>/dev/null || true)"
 
         if [ -z "$COGNITO_CLIENT_SECRET" ] || [ "$COGNITO_CLIENT_SECRET" = "None" ]; then
-          echo "##[error]Could not fetch Cognito client secret. Make sure the app client was created with a secret."
+          echo "##[error]Could not fetch Cognito client secret. Ensure the app client has GenerateSecret enabled."
           exit 1
         fi
 
-        COOKIE_SECRET="STABLE_SECRET_V1_FOR_32_BYTE_AES"  # exactly 32 bytes
+        COOKIE_SECRET="STABLE_SECRET_V1_FOR_32_BYTE_AES"
 
         echo "##vso[task.setvariable variable=COGNITO_CLIENT_ID;isSecret=true]$COGNITO_CLIENT_ID"
         echo "##vso[task.setvariable variable=COGNITO_CLIENT_SECRET;isSecret=true]$COGNITO_CLIENT_SECRET"
@@ -173,7 +238,6 @@ jobs:
         echo "##vso[task.setvariable variable=APIGW_URL]$APIGW_URL"
         echo "##vso[task.setvariable variable=COOKIE_SECRET;isSecret=true]$COOKIE_SECRET"
 
-  # 5) OAuth2 Proxy
   - task: AWSShellScript@1
     displayName: Deploy OAuth2-Proxy
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -184,7 +248,6 @@ jobs:
       inlineScript: |
         set -euo pipefail
 
-        echo "Installing OAuth2-Proxy..."
         helm upgrade --install oauth2-proxy oauth2-proxy \
           --repo https://oauth2-proxy.github.io/manifests \
           --namespace ingress-nginx --create-namespace \
@@ -209,7 +272,6 @@ jobs:
       COGNITO_ISSUER_URL: $(COGNITO_ISSUER_URL)
       APIGW_URL: $(APIGW_URL)
 
-  # 6) Vault
   - task: AWSShellScript@1
     displayName: Deploy Vault
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -219,7 +281,6 @@ jobs:
       scriptType: inline
       inlineScript: |
         set -euo pipefail
-
         kubectl delete MutatingWebhookConfiguration vault-agent-injector-cfg --ignore-not-found=true || true
 
         cat > vault-values.yaml <<'EOF'
@@ -250,10 +311,9 @@ jobs:
         helm upgrade --install vault vault \
           --repo https://helm.releases.hashicorp.com \
           --namespace platform --create-namespace \
-          --wait --timeout 15m \
+          --wait --timeout 15m --atomic \
           -f vault-values.yaml
 
-  # 7) ArgoCD
   - task: AWSShellScript@1
     displayName: Deploy ArgoCD
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -287,7 +347,7 @@ jobs:
         helm upgrade --install argocd argo-cd \
           --repo https://argoproj.github.io/argo-helm \
           --namespace platform --create-namespace \
-          --wait --timeout 20m \
+          --wait --timeout 20m --atomic \
           -f argocd-values.yaml
 
         kubectl apply -f - <<'INGRESS_EOF'
@@ -312,7 +372,6 @@ jobs:
                       number: 80
         INGRESS_EOF
 
-  # 8) SonarQube
   - task: AWSShellScript@1
     displayName: Deploy SonarQube
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -340,11 +399,11 @@ jobs:
         helm upgrade --install sonarqube sonarqube \
           --repo https://SonarSource.github.io/helm-chart-sonarqube \
           --namespace platform --create-namespace \
-          --wait --timeout 25m \
+          --wait --timeout 30m --atomic \
           -f sonarqube-values.yaml
 
   # -----------------------------
-  # DESTROY
+  # DESTROY MODE (add-ons only)
   # -----------------------------
   - task: AWSShellScript@1
     displayName: Destroy platform add-ons (helm uninstall + namespaces)
