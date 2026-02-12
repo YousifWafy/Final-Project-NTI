@@ -155,6 +155,7 @@ jobs:
 
         kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide --request-timeout=30s
 
+  # Fix #1: stop "hanging" + resolve LB ARN using DNSName (not by cutting the DNS)
   - task: AWSShellScript@1
     displayName: Update Terraform with NLB DNS + Listener ARN (optional)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -227,6 +228,7 @@ jobs:
           -var="nlb_dns_name=http://$NLB_DNS" \
           -var="nlb_listener_arn=$LISTENER_ARN"
 
+  # Fix #2: Cognito secret may be None for public clients -> don't fail, switch to PKCE mode
   - task: AWSShellScript@1
     displayName: Export Cognito + APIGW outputs (and fetch Cognito secret)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -250,17 +252,21 @@ jobs:
           exit 1
         fi
 
-        # Fetch the client secret from AWS (requires the app client to have GenerateSecret enabled)
+        # Try fetch secret (will be None for public clients)
         COGNITO_CLIENT_SECRET="$(aws cognito-idp describe-user-pool-client \
           --user-pool-id "$USER_POOL_ID" \
           --client-id "$COGNITO_CLIENT_ID" \
           --query 'UserPoolClient.ClientSecret' --output text 2>/dev/null || true)"
 
         if [ -z "$COGNITO_CLIENT_SECRET" ] || [ "$COGNITO_CLIENT_SECRET" = "None" ]; then
-          echo "##[error]Could not fetch Cognito client secret. Ensure the app client has GenerateSecret enabled."
-          exit 1
+          echo "##[warning]Cognito client secret not available (likely GenerateSecret=false/public client). Will use PKCE mode in oauth2-proxy."
+          COGNITO_CLIENT_SECRET=""
+          USE_PKCE="true"
+        else
+          USE_PKCE="false"
         fi
 
+        # NOTE: Replace with a proper base64 32-byte secret in production
         COOKIE_SECRET="STABLE_SECRET_V1_FOR_32_BYTE_AES"
 
         echo "##vso[task.setvariable variable=COGNITO_CLIENT_ID;isSecret=true]$COGNITO_CLIENT_ID"
@@ -268,6 +274,7 @@ jobs:
         echo "##vso[task.setvariable variable=COGNITO_ISSUER_URL]$COGNITO_ISSUER_URL"
         echo "##vso[task.setvariable variable=APIGW_URL]$APIGW_URL"
         echo "##vso[task.setvariable variable=COOKIE_SECRET;isSecret=true]$COOKIE_SECRET"
+        echo "##vso[task.setvariable variable=USE_PKCE]$USE_PKCE"
 
   - task: AWSShellScript@1
     displayName: Deploy OAuth2-Proxy
@@ -278,6 +285,7 @@ jobs:
       COOKIE_SECRET: $(COOKIE_SECRET)
       COGNITO_ISSUER_URL: $(COGNITO_ISSUER_URL)
       APIGW_URL: $(APIGW_URL)
+      USE_PKCE: $(USE_PKCE)
     inputs:
       awsCredentials: $(AWS_SERVICE_CONNECTION)
       regionName: $(AWS_REGION)
@@ -285,19 +293,31 @@ jobs:
       inlineScript: |
         set -euo pipefail
 
+        EXTRA_SECRET_ARGS=()
+        EXTRA_OIDC_ARGS=()
+
+        # If we have a secret, pass it. If not, enable PKCE.
+        if [ -n "${COGNITO_CLIENT_SECRET:-}" ]; then
+          EXTRA_SECRET_ARGS+=(--set config.clientSecret="$COGNITO_CLIENT_SECRET")
+        else
+          EXTRA_OIDC_ARGS+=(--set extraArgs.pkce="true")
+          EXTRA_OIDC_ARGS+=(--set extraArgs.code-challenge-method="S256")
+        fi
+
         helm upgrade --install oauth2-proxy oauth2-proxy \
           --repo https://oauth2-proxy.github.io/manifests \
           --namespace ingress-nginx --create-namespace \
           --wait --timeout 20m --atomic \
           --set config.clientID="$COGNITO_CLIENT_ID" \
-          --set config.clientSecret="$COGNITO_CLIENT_SECRET" \
           --set config.cookieSecret="$COOKIE_SECRET" \
+          "${EXTRA_SECRET_ARGS[@]}" \
           --set extraArgs.provider="oidc" \
           --set extraArgs.oidc-issuer-url="$COGNITO_ISSUER_URL" \
           --set extraArgs.skip-provider-button=true \
           --set extraArgs.upstream="file:///dev/null" \
           --set extraArgs.http-address="0.0.0.0:4180" \
           --set extraArgs.redirect-url="${APIGW_URL}/oauth2/callback" \
+          "${EXTRA_OIDC_ARGS[@]}" \
           --set ingress.enabled=true \
           --set ingress.className="nginx" \
           --set ingress.path="/oauth2" \
