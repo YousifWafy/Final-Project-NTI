@@ -164,29 +164,60 @@ jobs:
       scriptType: inline
       inlineScript: |
         set -euo pipefail
-        cd "$(TF_DIR)"
 
-        echo "Waiting for NLB hostname..."
+        echo "Waiting for NLB hostname from ingress-nginx service..."
         NLB_DNS=""
+
+        # 36 * 10s = 6 minutes max
         for i in {1..36}; do
-          NLB_DNS="$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' --request-timeout=30s 2>/dev/null || true)"
-          if [ -n "$NLB_DNS" ]; then break; fi
+          NLB_DNS="$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+            --request-timeout=30s 2>/dev/null || true)"
+
+          if [ -n "$NLB_DNS" ]; then
+            echo "✅ Found NLB DNS: $NLB_DNS (after ${i} tries)"
+            break
+          fi
+
+          echo "Attempt ${i}/36: NLB DNS not ready yet... sleeping 10s"
           sleep 10
         done
 
         if [ -z "$NLB_DNS" ]; then
-          echo "##[warning]NLB DNS not ready. Skipping terraform apply for NLB vars."
+          echo "##[warning]NLB DNS not ready after 6 minutes. Skipping terraform apply for NLB vars."
+          kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide || true
           exit 0
         fi
 
-        echo "NLB DNS: $NLB_DNS"
-        NLB_NAME="$(echo "$NLB_DNS" | cut -d'-' -f1)"
+        echo "Resolving LoadBalancerArn by DNSName..."
+        LB_ARN="$(aws elbv2 describe-load-balancers \
+          --query "LoadBalancers[?DNSName=='$NLB_DNS'].LoadBalancerArn | [0]" \
+          --output text)"
 
-        LB_ARN="$(aws elbv2 describe-load-balancers --names "$NLB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text)"
-        LISTENER_ARN="$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[0].ListenerArn' --output text)"
+        if [ -z "$LB_ARN" ] || [ "$LB_ARN" = "None" ]; then
+          echo "##[error]Could not resolve LoadBalancerArn from DNSName=$NLB_DNS"
+          aws elbv2 describe-load-balancers --query 'LoadBalancers[].{DNS:DNSName,Arn:LoadBalancerArn}' --output table | head -n 200 || true
+          exit 1
+        fi
+
+        echo "LB_ARN: $LB_ARN"
+        echo "Resolving ListenerArn..."
+        LISTENER_ARN="$(aws elbv2 describe-listeners \
+          --load-balancer-arn "$LB_ARN" \
+          --query 'Listeners[0].ListenerArn' \
+          --output text)"
+
+        if [ -z "$LISTENER_ARN" ] || [ "$LISTENER_ARN" = "None" ]; then
+          echo "##[error]Could not resolve ListenerArn for LB_ARN=$LB_ARN"
+          aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --output table || true
+          exit 1
+        fi
 
         echo "LISTENER_ARN: $LISTENER_ARN"
 
+        cd "$(TF_DIR)"
+
+        # Use plugin cache if exists
         if [ -f "$HOME/.terraformrc" ]; then
           export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
         fi
@@ -241,6 +272,12 @@ jobs:
   - task: AWSShellScript@1
     displayName: Deploy OAuth2-Proxy
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    env:
+      COGNITO_CLIENT_ID: $(COGNITO_CLIENT_ID)
+      COGNITO_CLIENT_SECRET: $(COGNITO_CLIENT_SECRET)
+      COOKIE_SECRET: $(COOKIE_SECRET)
+      COGNITO_ISSUER_URL: $(COGNITO_ISSUER_URL)
+      APIGW_URL: $(APIGW_URL)
     inputs:
       awsCredentials: $(AWS_SERVICE_CONNECTION)
       regionName: $(AWS_REGION)
@@ -265,12 +302,6 @@ jobs:
           --set ingress.className="nginx" \
           --set ingress.path="/oauth2" \
           --set ingress.hosts[0]=""
-    env:
-      COGNITO_CLIENT_ID: $(COGNITO_CLIENT_ID)
-      COGNITO_CLIENT_SECRET: $(COGNITO_CLIENT_SECRET)
-      COOKIE_SECRET: $(COOKIE_SECRET)
-      COGNITO_ISSUER_URL: $(COGNITO_ISSUER_URL)
-      APIGW_URL: $(APIGW_URL)
 
   - task: AWSShellScript@1
     displayName: Deploy Vault
