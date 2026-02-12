@@ -257,7 +257,7 @@ jobs:
   # OAuth2-Proxy (rollback-on-failure + diagnostics)
   # -----------------------------
   - task: AWSShellScript@1
-    displayName: Deploy OAuth2-Proxy
+    displayName: Deploy OAuth2-Proxy (debug-friendly)
     env:
       COGNITO_CLIENT_ID: $(COGNITO_CLIENT_ID)
       COGNITO_CLIENT_SECRET: $(COGNITO_CLIENT_SECRET)
@@ -278,10 +278,11 @@ jobs:
         echo "Deploying oauth2-proxy..."
         echo "USE_PKCE=${USE_PKCE:-}"
 
+        # IMPORTANT: remove rollback during debugging so resources remain for inspection
         HELM_BASE="helm upgrade --install ${REL} oauth2-proxy \
           --repo https://oauth2-proxy.github.io/manifests \
           --namespace ${NS} --create-namespace \
-          --wait --timeout 30m --rollback-on-failure \
+          --wait --timeout 30m \
           --set config.clientID=\"$COGNITO_CLIENT_ID\" \
           --set config.cookieSecret=\"$COOKIE_SECRET\" \
           --set extraArgs.provider=\"oidc\" \
@@ -297,27 +298,42 @@ jobs:
 
         set +e
         if [ -n "${COGNITO_CLIENT_SECRET:-}" ]; then
-          echo "Using client secret (confidential client)."
+          echo "Using client secret."
           eval "$HELM_BASE --set config.clientSecret=\"$COGNITO_CLIENT_SECRET\""
           RC=$?
         else
-          echo "No client secret found -> enabling PKCE."
+          echo "No client secret -> PKCE."
           eval "$HELM_BASE --set extraArgs.pkce=true --set extraArgs.code-challenge-method=S256"
           RC=$?
         fi
         set -e
 
+        echo "---- helm status ${REL} -n ${NS} ----"
+        helm status "${REL}" -n "${NS}" || true
+
+        echo "---- kubectl get pods -n ${NS} (oauth2-proxy) ----"
+        kubectl get pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" -o wide || true
+
+        kubectl logs -n "${NS}" -l "app.kubernetes.io/instance=${REL}" --tail=200 --all-containers || true
+        kubectl describe pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" || true
+
+        POD="$(kubectl get pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+        if [ -n "$POD" ]; then
+          echo "---- kubectl describe pod/$POD -n ${NS} ----"
+          kubectl describe pod "$POD" -n "${NS}" || true
+
+          echo "---- kubectl logs pod/$POD -n ${NS} (last 300) ----"
+          kubectl logs "$POD" -n "${NS}" --tail=300 || true
+
+          echo "---- kubectl logs pod/$POD -n ${NS} (previous, last 300) ----"
+          kubectl logs "$POD" -n "${NS}" --previous --tail=300 || true
+        fi
+
+        echo "---- kubectl get events -n ${NS} (last 60) ----"
+        kubectl get events -n "${NS}" --sort-by=.lastTimestamp | tail -n 60 || true
+
         if [ $RC -ne 0 ]; then
-          echo "##[error]oauth2-proxy helm deploy failed (rc=$RC). Collecting diagnostics..."
-          kubectl get all -n "${NS}" -o wide || true
-          kubectl get events -n "${NS}" --sort-by=.lastTimestamp | tail -n 60 || true
-          kubectl describe deploy "${REL}" -n "${NS}" || true
-          POD="$(kubectl get pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-          if [ -n "$POD" ]; then
-            kubectl describe pod "$POD" -n "${NS}" || true
-            kubectl logs "$POD" -n "${NS}" --tail=200 || true
-            kubectl logs "$POD" -n "${NS}" --previous --tail=200 || true
-          fi
+          echo "##[error]oauth2-proxy helm deploy failed (rc=$RC). See logs above."
           exit $RC
         fi
 
