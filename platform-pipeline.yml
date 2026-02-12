@@ -1,0 +1,417 @@
+name: $(Date:yyyyMMdd)$(Rev:.r)-Platform
+trigger: none
+pr: none
+
+parameters:
+  - name: env
+    displayName: Environment
+    type: string
+    values: [nonprod, prod]
+
+  - name: action
+    displayName: Action
+    type: string
+    default: deploy
+    values: [deploy, destroy]
+
+variables:
+  # Terraform folder in your repo
+  TF_DIR: 'terraform'
+  TF_VAR_FILE: '${{ parameters.env }}.tfvars'
+
+  # Your Azure DevOps AWS Service Connection
+  AWS_SERVICE_CONNECTION: 'yousif-aws-v2'
+
+  # Your AWS Region (matches your infra)
+  AWS_REGION: 'ap-northeast-2'
+
+pool:
+  name: Yousif-Agent_Pool
+
+jobs:
+- job: Platform
+  displayName: 'Platform Addons (Nginx, OAuth2-Proxy, Vault, ArgoCD, Sonar)'
+  timeoutInMinutes: 180
+  steps:
+  - checkout: self
+    fetchDepth: 1
+
+  # -----------------------------
+  # 0) Preflight: Terraform + cache config
+  # -----------------------------
+  - task: TerraformInstaller@1
+    displayName: Install Terraform
+    inputs:
+      terraformVersion: latest
+
+  - task: AWSShellScript@1
+    displayName: Terraform init (prefer plugin cache, lockfile readonly)
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+        cd "$(TF_DIR)"
+
+        echo "Terraform version:"
+        terraform -version
+
+        # Prefer local terraformrc (on your self-hosted agent) to use plugin cache
+        if [ -f "$HOME/.terraformrc" ]; then
+          export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+          echo "Using TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
+        else
+          echo "##[warning]~/.terraformrc not found. Providers may need internet access."
+        fi
+
+        # Helpful when cache exists
+        export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-$HOME/.terraform.d/plugin-cache}"
+        mkdir -p "$TF_PLUGIN_CACHE_DIR" || true
+        echo "TF_PLUGIN_CACHE_DIR=$TF_PLUGIN_CACHE_DIR"
+
+        terraform init -reconfigure -lockfile=readonly
+
+  # -----------------------------
+  # 1) Configure kubeconfig from Terraform output
+  # -----------------------------
+  - task: AWSShellScript@1
+    displayName: Configure kubeconfig
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+        cd "$(TF_DIR)"
+
+        CLUSTER_NAME="$(terraform output -raw cluster_name 2>/dev/null || true)"
+        if [ -z "$CLUSTER_NAME" ]; then
+          echo "##[error]Could not read terraform output 'cluster_name'."
+          terraform output || true
+          exit 1
+        fi
+
+        echo "Updating kubeconfig for: $CLUSTER_NAME"
+        aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$(AWS_REGION)"
+
+        # Patch kubeconfig to use absolute aws path (macOS sed differs)
+        AWS_BIN="$(command -v aws || true)"
+        if [ -n "$AWS_BIN" ]; then
+          if sed --version >/dev/null 2>&1; then
+            sed -i "s|command: aws|command: $AWS_BIN|g" "$HOME/.kube/config" || true
+          else
+            sed -i '' "s|command: aws|command: $AWS_BIN|g" "$HOME/.kube/config" || true
+          fi
+        fi
+
+        kubectl get nodes
+
+  # -----------------------------
+  # 2) Install Helm (needed in deploy + destroy)
+  # -----------------------------
+  - task: HelmInstaller@1
+    displayName: Install Helm
+    inputs:
+      helmVersionToInstall: 'latest'
+
+  # -----------------------------
+  # DEPLOY MODE
+  # -----------------------------
+
+  # 3) Nginx Ingress (creates NLB)
+  - task: AWSShellScript@1
+    displayName: Deploy Nginx Ingress (NLB)
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+
+        echo "Installing ingress-nginx..."
+        helm upgrade --install ingress-nginx ingress-nginx \
+          --repo https://kubernetes.github.io/ingress-nginx \
+          --namespace ingress-nginx --create-namespace \
+          --version 4.11.3 \
+          --set controller.service.type=LoadBalancer \
+          --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="nlb" \
+          --set controller.admissionWebhooks.enabled=false \
+          --wait --timeout 15m --debug
+
+        kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide
+
+  # 4) Link API GW to NLB (optional terraform apply)
+  - task: AWSShellScript@1
+    displayName: Update Terraform with NLB DNS + Listener ARN
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+        cd "$(TF_DIR)"
+
+        echo "Waiting for NLB hostname..."
+        NLB_DNS=""
+        for i in {1..36}; do
+          NLB_DNS="$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+          if [ -n "$NLB_DNS" ]; then break; fi
+          sleep 10
+        done
+
+        if [ -z "$NLB_DNS" ]; then
+          echo "##[warning]NLB DNS not ready. Skipping terraform apply for NLB vars."
+          exit 0
+        fi
+
+        echo "NLB DNS: $NLB_DNS"
+
+        # NLB name is usually the first token before the first dash
+        NLB_NAME="$(echo "$NLB_DNS" | cut -d'-' -f1)"
+        echo "NLB name guess: $NLB_NAME"
+
+        LB_ARN="$(aws elbv2 describe-load-balancers --names "$NLB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text)"
+        LISTENER_ARN="$(aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --query 'Listeners[0].ListenerArn' --output text)"
+
+        echo "LB_ARN: $LB_ARN"
+        echo "LISTENER_ARN: $LISTENER_ARN"
+
+        if [ -f "$HOME/.terraformrc" ]; then
+          export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+        fi
+
+        terraform apply -auto-approve \
+          -var-file="$(TF_VAR_FILE)" \
+          -var="nlb_dns_name=http://$NLB_DNS" \
+          -var="nlb_listener_arn=$LISTENER_ARN"
+
+  # 5) Export Terraform outputs (Cognito + APIGW)
+  - task: AWSShellScript@1
+    displayName: Export Terraform outputs (Cognito, APIGW)
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+        cd "$(TF_DIR)"
+
+        COGNITO_CLIENT_ID="$(terraform output -raw cognito_client_id 2>/dev/null || true)"
+        COGNITO_CLIENT_SECRET="$(terraform output -raw cognito_client_secret 2>/dev/null || true)"
+        COGNITO_ISSUER_URL="$(terraform output -raw cognito_issuer_url 2>/dev/null || true)"
+        APIGW_URL="$(terraform output -raw api_gateway_url 2>/dev/null || true)"
+
+        if [ -z "$COGNITO_CLIENT_ID" ] || [ -z "$COGNITO_CLIENT_SECRET" ] || [ -z "$COGNITO_ISSUER_URL" ] || [ -z "$APIGW_URL" ]; then
+          echo "##[error]Missing required terraform outputs."
+          terraform output || true
+          exit 1
+        fi
+
+        # Must be exactly 32 bytes
+        COOKIE_SECRET="STABLE_SECRET_V1_FOR_32_BYTE_AES"
+
+        echo "##vso[task.setvariable variable=COGNITO_CLIENT_ID;isSecret=true]$COGNITO_CLIENT_ID"
+        echo "##vso[task.setvariable variable=COGNITO_CLIENT_SECRET;isSecret=true]$COGNITO_CLIENT_SECRET"
+        echo "##vso[task.setvariable variable=COGNITO_ISSUER_URL]$COGNITO_ISSUER_URL"
+        echo "##vso[task.setvariable variable=APIGW_URL]$APIGW_URL"
+        echo "##vso[task.setvariable variable=COOKIE_SECRET;isSecret=true]$COOKIE_SECRET"
+
+  # 6) OAuth2 Proxy
+  - task: AWSShellScript@1
+    displayName: Deploy OAuth2-Proxy
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+
+        echo "Installing OAuth2-Proxy..."
+        helm upgrade --install oauth2-proxy oauth2-proxy \
+          --repo https://oauth2-proxy.github.io/manifests \
+          --namespace ingress-nginx --create-namespace \
+          --wait --timeout 15m --atomic \
+          --set config.clientID="$COGNITO_CLIENT_ID" \
+          --set config.clientSecret="$COGNITO_CLIENT_SECRET" \
+          --set config.cookieSecret="$COOKIE_SECRET" \
+          --set extraArgs.provider="oidc" \
+          --set extraArgs.oidc-issuer-url="$COGNITO_ISSUER_URL" \
+          --set extraArgs.skip-provider-button=true \
+          --set extraArgs.upstream="file:///dev/null" \
+          --set extraArgs.http-address="0.0.0.0:4180" \
+          --set extraArgs.redirect-url="${APIGW_URL}/oauth2/callback" \
+          --set ingress.enabled=true \
+          --set ingress.className="nginx" \
+          --set ingress.path="/oauth2" \
+          --set ingress.hosts[0]=""
+    env:
+      COGNITO_CLIENT_ID: $(COGNITO_CLIENT_ID)
+      COGNITO_CLIENT_SECRET: $(COGNITO_CLIENT_SECRET)
+      COOKIE_SECRET: $(COOKIE_SECRET)
+      COGNITO_ISSUER_URL: $(COGNITO_ISSUER_URL)
+      APIGW_URL: $(APIGW_URL)
+
+  # 7) Vault
+  - task: AWSShellScript@1
+    displayName: Deploy Vault
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+
+        kubectl delete MutatingWebhookConfiguration vault-agent-injector-cfg --ignore-not-found=true || true
+
+        cat > vault-values.yaml <<'EOF'
+        server:
+          ha:
+            enabled: false
+            replicas: 1
+          dataStorage:
+            storageClass: gp2
+            size: 1Gi
+          service:
+            type: ClusterIP
+          ingress:
+            enabled: true
+            ingressClassName: nginx
+            hosts:
+              - host: ""
+                paths:
+                  - /vault/?(.*)
+                  - /(ui(?:/.*)?)
+            annotations:
+              nginx.ingress.kubernetes.io/use-regex: "true"
+              nginx.ingress.kubernetes.io/rewrite-target: /\$1
+        ui:
+          enabled: true
+        EOF
+
+        helm upgrade --install vault vault \
+          --repo https://helm.releases.hashicorp.com \
+          --namespace platform --create-namespace \
+          --wait --timeout 10m \
+          -f vault-values.yaml
+
+  # 8) ArgoCD
+  - task: AWSShellScript@1
+    displayName: Deploy ArgoCD
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+
+        cat > argocd-values.yaml <<'EOF'
+        redis-ha:
+          enabled: false
+        controller:
+          replicas: 1
+        server:
+          replicas: 1
+          service:
+            type: ClusterIP
+          ingress:
+            enabled: false
+          extraArgs:
+            - --insecure
+            - --rootpath=/argocd
+        repoServer:
+          replicas: 1
+        applicationController:
+          replicas: 1
+        EOF
+
+        helm upgrade --install argocd argo-cd \
+          --repo https://argoproj.github.io/argo-helm \
+          --namespace platform --create-namespace \
+          --wait --timeout 15m \
+          -f argocd-values.yaml
+
+        kubectl apply -f - <<'INGRESS_EOF'
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: argocd-server
+          namespace: platform
+          annotations:
+            nginx.ingress.kubernetes.io/backend-protocol: HTTP
+        spec:
+          ingressClassName: nginx
+          rules:
+          - http:
+              paths:
+              - path: /argocd
+                pathType: Prefix
+                backend:
+                  service:
+                    name: argocd-server
+                    port:
+                      number: 80
+        INGRESS_EOF
+
+  # 9) SonarQube
+  - task: AWSShellScript@1
+    displayName: Deploy SonarQube
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+
+        cat > sonarqube-values.yaml <<'EOF'
+        service:
+          type: ClusterIP
+        ingress:
+          enabled: true
+          ingressClassName: nginx
+          hosts:
+            - name: ""
+              path: "/sonarqube"
+          annotations:
+            nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+        sonarWebContext: /sonarqube
+        EOF
+
+        helm upgrade --install sonarqube sonarqube \
+          --repo https://SonarSource.github.io/helm-chart-sonarqube \
+          --namespace platform --create-namespace \
+          --wait --timeout 20m \
+          -f sonarqube-values.yaml
+
+  # -----------------------------
+  # DESTROY MODE (clean only add-ons)
+  # -----------------------------
+  - task: AWSShellScript@1
+    displayName: Destroy platform add-ons (helm uninstall + namespaces)
+    condition: and(succeeded(), eq('${{ parameters.action }}', 'destroy'))
+    inputs:
+      awsCredentials: $(AWS_SERVICE_CONNECTION)
+      regionName: $(AWS_REGION)
+      scriptType: inline
+      inlineScript: |
+        set -euo pipefail
+
+        echo "Uninstalling Helm releases..."
+        helm uninstall sonarqube -n platform || true
+        helm uninstall argocd -n platform || true
+        helm uninstall vault -n platform || true
+        helm uninstall oauth2-proxy -n ingress-nginx || true
+        helm uninstall ingress-nginx -n ingress-nginx || true
+
+        echo "Deleting namespaces..."
+        kubectl delete ns platform --ignore-not-found=true || true
+        kubectl delete ns ingress-nginx --ignore-not-found=true || true
+
+        echo "Done."
