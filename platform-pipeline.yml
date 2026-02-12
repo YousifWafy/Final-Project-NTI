@@ -15,7 +15,6 @@ variables:
   AWS_SERVICE_CONNECTION: 'yousif-aws-v2'
   AWS_REGION: 'ap-northeast-2'
 
-  # Backend (same as infra state)
   TF_BACKEND_BUCKET: 'yousif-project-bucket'
   TF_BACKEND_KEY: '${{ parameters.env }}/terraform.tfstate'
 
@@ -35,9 +34,6 @@ jobs:
     inputs:
       terraformVersion: latest
 
-  # -----------------------------
-  # Terraform init (use correct backend state)
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Terraform init (S3 backend + plugin cache)
     inputs:
@@ -51,12 +47,10 @@ jobs:
         echo "Terraform version:"
         terraform -version
 
-        # Plugin cache
         export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-$HOME/.terraform.d/plugin-cache}"
         mkdir -p "$TF_PLUGIN_CACHE_DIR" || true
         echo "TF_PLUGIN_CACHE_DIR=$TF_PLUGIN_CACHE_DIR"
 
-        # Ensure aws exists (macOS agent عادة موجود)
         if ! command -v aws >/dev/null 2>&1; then
           echo "##[error]aws CLI not found on agent. Install AWS CLI on the agent."
           exit 1
@@ -69,12 +63,8 @@ jobs:
           -backend-config="region=$(AWS_REGION)" \
           -backend-config="encrypt=true"
 
-        echo "Terraform outputs (if any):"
         terraform output || true
 
-  # -----------------------------
-  # kubeconfig (safe output read)
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Configure kubeconfig
     inputs:
@@ -88,7 +78,7 @@ jobs:
         CLUSTER_NAME="$(terraform output -raw cluster_name 2>/dev/null || true)"
 
         if [ -z "$CLUSTER_NAME" ]; then
-          echo "##[error]cluster_name output is empty. Your terraform state has no outputs (or wrong backend key)."
+          echo "##[error]cluster_name output is empty. Wrong backend key or no outputs."
           echo "Backend key: $(TF_BACKEND_KEY)"
           terraform output || true
           exit 1
@@ -101,10 +91,7 @@ jobs:
           exit 1
         fi
 
-        echo "Updating kubeconfig for: $CLUSTER_NAME"
         aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$(AWS_REGION)"
-
-        echo "Cluster access check:"
         kubectl get nodes --request-timeout=30s
 
   - task: HelmInstaller@1
@@ -112,9 +99,6 @@ jobs:
     inputs:
       helmVersionToInstall: 'latest'
 
-  # -----------------------------
-  # Install Nginx Ingress
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Install Nginx Ingress
     inputs:
@@ -133,7 +117,6 @@ jobs:
         }
         trap 'handle_error' ERR
 
-        echo "Installing Nginx Ingress Controller..."
         helm upgrade --install ingress-nginx ingress-nginx \
           --repo https://kubernetes.github.io/ingress-nginx \
           --namespace ingress-nginx --create-namespace \
@@ -145,9 +128,6 @@ jobs:
 
         kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide --request-timeout=30s
 
-  # -----------------------------
-  # Link APIGW to LB (fix: resolve LB ARN by DNSName, not by cutting name)
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Link API Gateway to Load Balancer
     inputs:
@@ -165,27 +145,23 @@ jobs:
             -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
             --request-timeout=30s 2>/dev/null || true)"
           if [ -n "$NLB_DNS" ]; then
-            echo "✅ Found NLB DNS: $NLB_DNS (after ${i} tries)"
+            echo "✅ Found NLB DNS: $NLB_DNS"
             break
           fi
-          echo "Attempt ${i}/36: NLB DNS not ready... sleeping 10s"
           sleep 10
         done
 
         if [ -z "$NLB_DNS" ]; then
           echo "##[warning]Load Balancer DNS not found. Skipping API Gateway update."
-          kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide || true
           exit 0
         fi
 
-        echo "Resolving LoadBalancerArn by DNSName..."
         LB_ARN="$(aws elbv2 describe-load-balancers \
           --query "LoadBalancers[?DNSName=='$NLB_DNS'].LoadBalancerArn | [0]" \
           --output text)"
 
         if [ -z "$LB_ARN" ] || [ "$LB_ARN" = "None" ]; then
           echo "##[error]Could not resolve LB ARN for DNSName=$NLB_DNS"
-          aws elbv2 describe-load-balancers --query 'LoadBalancers[].{DNS:DNSName,Arn:LoadBalancerArn}' --output table | head -n 200 || true
           exit 1
         fi
 
@@ -196,18 +172,13 @@ jobs:
 
         if [ -z "$LISTENER_ARN" ] || [ "$LISTENER_ARN" = "None" ]; then
           echo "##[error]Could not resolve Listener ARN for LB_ARN=$LB_ARN"
-          aws elbv2 describe-listeners --load-balancer-arn "$LB_ARN" --output table || true
           exit 1
         fi
 
-        echo "Running Terraform Apply to sync API Gateway..."
         terraform apply -auto-approve -var-file="$(TF_VAR_FILE)" \
           -var="nlb_dns_name=http://$NLB_DNS" \
           -var="nlb_listener_arn=$LISTENER_ARN"
 
-  # -----------------------------
-  # Export TF outputs (Cognito) safely + PKCE fallback
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Export Terraform Outputs (Cognito/APIGW)
     inputs:
@@ -218,44 +189,35 @@ jobs:
         set -euo pipefail
         cd "$(TF_DIR)"
 
-        # Read outputs safely (silence warnings)
         COGNITO_CLIENT_ID="$(terraform output -raw cognito_app_client_id 2>/dev/null || true)"
         COGNITO_ISSUER_URL="$(terraform output -raw cognito_issuer_url 2>/dev/null || true)"
         APIGW_URL="$(terraform output -raw api_gateway_endpoint 2>/dev/null || true)"
         USER_POOL_ID="$(terraform output -raw cognito_user_pool_id 2>/dev/null || true)"
 
         if [ -z "$COGNITO_CLIENT_ID" ] || [ -z "$COGNITO_ISSUER_URL" ] || [ -z "$APIGW_URL" ] || [ -z "$USER_POOL_ID" ]; then
-          echo "##[error]Missing required terraform outputs (Cognito/APIGW/UserPool). Check state/outputs."
+          echo "##[error]Missing required terraform outputs."
           terraform output || true
           exit 1
         fi
 
-        # Try fetch secret (public clients return None)
         COGNITO_CLIENT_SECRET="$(aws cognito-idp describe-user-pool-client \
           --user-pool-id "$USER_POOL_ID" \
           --client-id "$COGNITO_CLIENT_ID" \
           --query 'UserPoolClient.ClientSecret' --output text 2>/dev/null || true)"
 
-        if [ -z "$COGNITO_CLIENT_SECRET" ] || [ "$COGNITO_CLIENT_SECRET" = "None" ]; then
-          echo "##[warning]Cognito client secret not available (public client). Will use PKCE."
-          COGNITO_CLIENT_SECRET=""
-          USE_PKCE="true"
-        else
-          USE_PKCE="false"
-        fi
-
         COOKIE_SECRET="STABLE_SECRET_V1_FOR_32_BYTE_AES"
+
+        if [ -z "$COGNITO_CLIENT_SECRET" ] || [ "$COGNITO_CLIENT_SECRET" = "None" ]; then
+          echo "##[warning]Cognito client secret not available (public client)."
+          COGNITO_CLIENT_SECRET=""
+        fi
 
         echo "##vso[task.setvariable variable=COGNITO_CLIENT_ID;isSecret=true]$COGNITO_CLIENT_ID"
         echo "##vso[task.setvariable variable=COGNITO_CLIENT_SECRET;isSecret=true]$COGNITO_CLIENT_SECRET"
         echo "##vso[task.setvariable variable=COGNITO_ISSUER_URL]$COGNITO_ISSUER_URL"
         echo "##vso[task.setvariable variable=APIGW_URL]$APIGW_URL"
         echo "##vso[task.setvariable variable=COOKIE_SECRET;isSecret=true]$COOKIE_SECRET"
-        echo "##vso[task.setvariable variable=USE_PKCE]$USE_PKCE"
 
-  # -----------------------------
-  # OAuth2-Proxy (rollback-on-failure + diagnostics)
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Deploy OAuth2-Proxy (debug-friendly)
     env:
@@ -264,21 +226,15 @@ jobs:
       COOKIE_SECRET: $(COOKIE_SECRET)
       COGNITO_ISSUER_URL: $(COGNITO_ISSUER_URL)
       APIGW_URL: $(APIGW_URL)
-      USE_PKCE: $(USE_PKCE)
     inputs:
       awsCredentials: $(AWS_SERVICE_CONNECTION)
       regionName: $(AWS_REGION)
       scriptType: inline
       inlineScript: |
         set -euo pipefail
-
         NS="ingress-nginx"
         REL="oauth2-proxy"
 
-        echo "Deploying oauth2-proxy..."
-        echo "USE_PKCE=${USE_PKCE:-}"
-
-        # IMPORTANT: remove rollback during debugging so resources remain for inspection
         HELM_BASE="helm upgrade --install ${REL} oauth2-proxy \
           --repo https://oauth2-proxy.github.io/manifests \
           --namespace ${NS} --create-namespace \
@@ -287,6 +243,7 @@ jobs:
           --set config.cookieSecret=\"$COOKIE_SECRET\" \
           --set extraArgs.provider=\"oidc\" \
           --set extraArgs.oidc-issuer-url=\"$COGNITO_ISSUER_URL\" \
+          --set extraArgs.oidc-extra-audience=\"$COGNITO_CLIENT_ID\" \
           --set extraArgs.skip-provider-button=true \
           --set extraArgs.upstream=\"file:///dev/null\" \
           --set extraArgs.http-address=\"0.0.0.0:4180\" \
@@ -298,48 +255,24 @@ jobs:
 
         set +e
         if [ -n "${COGNITO_CLIENT_SECRET:-}" ]; then
-          echo "Using client secret."
           eval "$HELM_BASE --set config.clientSecret=\"$COGNITO_CLIENT_SECRET\""
           RC=$?
         else
-          echo "No client secret -> PKCE."
-          eval "$HELM_BASE --set extraArgs.pkce=true --set extraArgs.code-challenge-method=S256"
+          eval "$HELM_BASE"
           RC=$?
         fi
         set -e
 
-        echo "---- helm status ${REL} -n ${NS} ----"
-        helm status "${REL}" -n "${NS}" || true
-
-        echo "---- kubectl get pods -n ${NS} (oauth2-proxy) ----"
         kubectl get pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" -o wide || true
-
         kubectl logs -n "${NS}" -l "app.kubernetes.io/instance=${REL}" --tail=200 --all-containers || true
         kubectl describe pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" || true
-
-        POD="$(kubectl get pods -n "${NS}" -l "app.kubernetes.io/instance=${REL}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-        if [ -n "$POD" ]; then
-          echo "---- kubectl describe pod/$POD -n ${NS} ----"
-          kubectl describe pod "$POD" -n "${NS}" || true
-
-          echo "---- kubectl logs pod/$POD -n ${NS} (last 300) ----"
-          kubectl logs "$POD" -n "${NS}" --tail=300 || true
-
-          echo "---- kubectl logs pod/$POD -n ${NS} (previous, last 300) ----"
-          kubectl logs "$POD" -n "${NS}" --previous --tail=300 || true
-        fi
-
-        echo "---- kubectl get events -n ${NS} (last 60) ----"
         kubectl get events -n "${NS}" --sort-by=.lastTimestamp | tail -n 60 || true
 
         if [ $RC -ne 0 ]; then
-          echo "##[error]oauth2-proxy helm deploy failed (rc=$RC). See logs above."
+          echo "##[error]oauth2-proxy helm deploy failed (rc=$RC)."
           exit $RC
         fi
 
-  # -----------------------------
-  # Vault
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Cleanup Vault Webhooks
     inputs:
@@ -347,7 +280,6 @@ jobs:
       regionName: $(AWS_REGION)
       scriptType: inline
       inlineScript: |
-        echo "Cleaning up conflicting Vault webhooks..."
         kubectl delete MutatingWebhookConfiguration vault-agent-injector-cfg --ignore-not-found=true || true
 
   - task: AWSShellScript@1
@@ -358,7 +290,6 @@ jobs:
       scriptType: inline
       inlineScript: |
         set -euo pipefail
-
         cat > vault-ingress-values.yaml <<'EOF'
         server:
           ha:
@@ -390,9 +321,6 @@ jobs:
           --wait --timeout 15m --rollback-on-failure \
           -f vault-ingress-values.yaml
 
-  # -----------------------------
-  # Argo CD
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Install Argo CD
     inputs:
@@ -401,7 +329,6 @@ jobs:
       scriptType: inline
       inlineScript: |
         set -euo pipefail
-
         cat > argocd-ingress-values.yaml <<'EOF'
         redis-ha:
           enabled: false
@@ -450,9 +377,6 @@ jobs:
                       number: 80
         INGRESS_EOF
 
-  # -----------------------------
-  # SonarQube
-  # -----------------------------
   - task: AWSShellScript@1
     displayName: Install SonarQube
     inputs:
@@ -461,7 +385,6 @@ jobs:
       scriptType: inline
       inlineScript: |
         set -euo pipefail
-
         cat > sonarqube-values.yaml <<'EOF'
         service:
           type: ClusterIP
