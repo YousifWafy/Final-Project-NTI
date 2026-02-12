@@ -126,7 +126,6 @@ jobs:
   # -----------------------------
   # DEPLOY MODE
   # -----------------------------
-
   - task: AWSShellScript@1
     displayName: Deploy Nginx Ingress (NLB)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -155,7 +154,9 @@ jobs:
 
         kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide --request-timeout=30s
 
-  # Fix #1: stop "hanging" + resolve LB ARN using DNSName (not by cutting the DNS)
+  # -----------------------------
+  # Fix #1: Wait w/ progress + resolve LB ARN using DNSName
+  # -----------------------------
   - task: AWSShellScript@1
     displayName: Update Terraform with NLB DNS + Listener ARN (optional)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -218,7 +219,6 @@ jobs:
 
         cd "$(TF_DIR)"
 
-        # Use plugin cache if exists
         if [ -f "$HOME/.terraformrc" ]; then
           export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
         fi
@@ -228,7 +228,9 @@ jobs:
           -var="nlb_dns_name=http://$NLB_DNS" \
           -var="nlb_listener_arn=$LISTENER_ARN"
 
-  # Fix #2: Cognito secret may be None for public clients -> don't fail, switch to PKCE mode
+  # -----------------------------
+  # Fix #2: Cognito secret may be None -> don't fail, use PKCE for oauth2-proxy
+  # -----------------------------
   - task: AWSShellScript@1
     displayName: Export Cognito + APIGW outputs (and fetch Cognito secret)
     condition: and(succeeded(), eq('${{ parameters.action }}', 'deploy'))
@@ -252,14 +254,13 @@ jobs:
           exit 1
         fi
 
-        # Try fetch secret (will be None for public clients)
         COGNITO_CLIENT_SECRET="$(aws cognito-idp describe-user-pool-client \
           --user-pool-id "$USER_POOL_ID" \
           --client-id "$COGNITO_CLIENT_ID" \
           --query 'UserPoolClient.ClientSecret' --output text 2>/dev/null || true)"
 
         if [ -z "$COGNITO_CLIENT_SECRET" ] || [ "$COGNITO_CLIENT_SECRET" = "None" ]; then
-          echo "##[warning]Cognito client secret not available (likely GenerateSecret=false/public client). Will use PKCE mode in oauth2-proxy."
+          echo "##[warning]Cognito client secret not available (public client). Will use PKCE."
           COGNITO_CLIENT_SECRET=""
           USE_PKCE="true"
         else
@@ -293,35 +294,33 @@ jobs:
       inlineScript: |
         set -euo pipefail
 
-        EXTRA_SECRET_ARGS=()
-        EXTRA_OIDC_ARGS=()
+        echo "Deploying oauth2-proxy..."
+        echo "USE_PKCE=${USE_PKCE:-}"
 
-        # If we have a secret, pass it. If not, enable PKCE.
-        if [ -n "${COGNITO_CLIENT_SECRET:-}" ]; then
-          EXTRA_SECRET_ARGS+=(--set config.clientSecret="$COGNITO_CLIENT_SECRET")
-        else
-          EXTRA_OIDC_ARGS+=(--set extraArgs.pkce="true")
-          EXTRA_OIDC_ARGS+=(--set extraArgs.code-challenge-method="S256")
-        fi
-
-        helm upgrade --install oauth2-proxy oauth2-proxy \
+        HELM_BASE="helm upgrade --install oauth2-proxy oauth2-proxy \
           --repo https://oauth2-proxy.github.io/manifests \
           --namespace ingress-nginx --create-namespace \
           --wait --timeout 20m --atomic \
-          --set config.clientID="$COGNITO_CLIENT_ID" \
-          --set config.cookieSecret="$COOKIE_SECRET" \
-          "${EXTRA_SECRET_ARGS[@]}" \
-          --set extraArgs.provider="oidc" \
-          --set extraArgs.oidc-issuer-url="$COGNITO_ISSUER_URL" \
+          --set config.clientID=\"$COGNITO_CLIENT_ID\" \
+          --set config.cookieSecret=\"$COOKIE_SECRET\" \
+          --set extraArgs.provider=\"oidc\" \
+          --set extraArgs.oidc-issuer-url=\"$COGNITO_ISSUER_URL\" \
           --set extraArgs.skip-provider-button=true \
-          --set extraArgs.upstream="file:///dev/null" \
-          --set extraArgs.http-address="0.0.0.0:4180" \
-          --set extraArgs.redirect-url="${APIGW_URL}/oauth2/callback" \
-          "${EXTRA_OIDC_ARGS[@]}" \
+          --set extraArgs.upstream=\"file:///dev/null\" \
+          --set extraArgs.http-address=\"0.0.0.0:4180\" \
+          --set extraArgs.redirect-url=\"${APIGW_URL}/oauth2/callback\" \
           --set ingress.enabled=true \
-          --set ingress.className="nginx" \
-          --set ingress.path="/oauth2" \
-          --set ingress.hosts[0]=""
+          --set ingress.className=\"nginx\" \
+          --set ingress.path=\"/oauth2\" \
+          --set ingress.hosts[0]=\"\""
+
+        if [ -n "${COGNITO_CLIENT_SECRET:-}" ]; then
+          echo "Using client secret (confidential client)."
+          eval "$HELM_BASE --set config.clientSecret=\"$COGNITO_CLIENT_SECRET\""
+        else
+          echo "No client secret found -> enabling PKCE."
+          eval "$HELM_BASE --set extraArgs.pkce=true --set extraArgs.code-challenge-method=S256"
+        fi
 
   - task: AWSShellScript@1
     displayName: Deploy Vault
